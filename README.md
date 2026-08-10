@@ -18,13 +18,32 @@ An Agent Skill for running a **multi-agent orchestration session** on top of [Or
 
 ## Install
 
-Claude Code / plugin marketplace：
+### OMP and other agents (`skills` CLI, recommended)
+
+Install globally through the open [`skills`](https://github.com/vercel-labs/skills) CLI:
 
 ```bash
-/plugin marketplace add jiwangyihao/orca-conductor
+npx skills@latest add jiwangyihao/orca-conductor \
+  --skill orca-conductor \
+  --global \
+  --agent universal \
+  --yes
 ```
 
-或者直接把 `skills/orca-conductor/` 复制到你的 agent 的 skills 目录（`~/.claude/skills/`、`user_skills/` 等）。
+`universal` installs the managed copy at `~/.agents/skills/orca-conductor`, which OMP discovers as a user skill. Update it later with:
+
+```bash
+npx skills@latest update --global orca-conductor --yes
+```
+
+### Claude Code plugin marketplace
+
+```text
+/plugin marketplace add jiwangyihao/orca-conductor
+/plugin install orca-conductor@orca-conductor
+```
+
+Do not install both methods for the same agent; duplicate copies can make skill resolution ambiguous.
 
 ## Layout
 
