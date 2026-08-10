@@ -1,0 +1,25 @@
+{
+  "name": "orca-conductor",
+  "owner": {
+    "name": "jiwangyihao",
+    "url": "https://github.com/jiwangyihao"
+  },
+  "description": "Coordinator-side discipline for multi-agent orchestration sessions on Orca: worker briefs, phase/step checkpoints, interruption recovery, acceptance and worktree reclamation.",
+  "plugins": [
+    {
+      "name": "orca-conductor",
+      "source": "./",
+      "description": "Run a disciplined Orca multi-agent orchestration session: detailed worker briefs with a read-back gate, phase/step checkpoint-rewind bookkeeping, evidence-based interruption recovery, independent acceptance, and safe worktree reclamation.",
+      "category": "engineering",
+      "keywords": [
+        "orca",
+        "orchestration",
+        "multi-agent",
+        "coordinator",
+        "worktree",
+        "checkpoint",
+        "handoff"
+      ]
+    }
+  ]
+}
