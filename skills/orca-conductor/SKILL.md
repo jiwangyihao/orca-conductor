@@ -1,7 +1,7 @@
 ---
 name: orca-conductor
 description: 把当前会话变成 Orca 多 Agent 调度会话（coordinator）的作业规范：按执行拓扑划分串行 Phase 与 Step、用 checkpoint/rewind 压缩调度上下文并交接状态、编写详尽的 Worker Brief 与强制 Read-back Gate、通过 git 基线与共享目录把上下文推给隔离 worktree 中的 worker、用三证据法观测与恢复意外中断的 worker、独立复跑验收产出、按 Phase 回收 worker 与自建 worktree。适用于"调度会话/coordinator/派发多个 Agent/并行 worker/多 worktree 协作/worker 卡住了不响应/要不要重开 Agent/任务指示写得太简略/验收 worker 产出/回收 worktree"等场景。CLI 参数细节以 Orca 自带的 orchestration skill 为准，本 skill 只管调度纪律。
-author: "jiwangyihao <jwyh@jwyihao.top>"
+author: zhangyihao.jwyh
 ---
 
 # Orca Conductor
@@ -35,6 +35,7 @@ orca worktree current --json     # 记下自己的 path 与 id，标注 PROTECTE
 6. **补发优先于重开**：`send --to dispatch:<id>` 能解决的问题，不要用重开解决。
 7. **每个 Step 一次 checkpoint→rewind**，report 必须承载 id 与下一步。
 8. **只回收自己 owned 清单里的资源**，当前 worktree 永不删。
+9. **Todo 与 Phase 拓扑同源**：todo 的 Phase 分组必须能和当前 checkpoint 的 Phase 编号、活跃 worktree 分组逐一对上；对不上就是 todo 已经落后。
 
 ## 会话骨架
 
@@ -56,6 +57,28 @@ S1 规划 ──▶ S2 派发 ──▶ S3 等待观测 ──┬──▶ S5 �
 - **rewind 会丢弃 Step 内的中间上下文**。task id、dispatch id、基线 SHA、brief 与台账路径、owned 清单，必须写进 report 或落盘到 `conductor-state.md`。丢了 dispatch id，就再也无法向那个 worker 补发指令。
 - **看到 checkpoint 报告 = 你已经 rewind 过了**。rewind 通常不留独立调用记录，报告本身就是记录；不要怀疑，也不要重复调用（会报错）。
 
+## Todo 是 Phase 拓扑的镜像
+
+Todo 列表的唯一作用是让人一眼看出"现在在哪个 Phase、这个 Phase 还剩什么"。它不是历史台账，历史留在 `conductor-state.md` 和 rewind report 里。
+
+**只排到看得清的地方**：当前 Phase 展开到 Step 级，下一个 Phase 给粗粒度条目，更远的 Phase 只留一行占位。下游 Phase 的形状取决于上游产出，一次性把 Phase 1–XIII 排成 80 条，等于把一份必然作废的计划写进上下文；之后每次真实拓扑变化都要在 80 条里做外科手术，最终必然放弃维护。
+
+**调度会话里 todo 落后的主因不是懒，是需求变了**。上游结论被推翻、验收标准被修正、某个 Phase 被合并或整体废弃——此时旧条目已经失去意义，而它们看上去仍然"只是没做完"。所以以下任一情况发生时立刻重规划，不要等人来问"todo 是不是落后了"：
+
+- 收到纠正 / 需求变更，导致某个 Phase 部分或全部作废
+- 你已经在做的 Phase 编号超过了 todo 里 in_progress 的 Phase
+- Phase 出口条件被改写，或 Phase 被跳过 / 合并 / 拆分
+- 每次 rewind 时顺手核对一次（report 里就该声明"todo 需不需要重建"）
+
+**重规划动作**：
+
+1. 真正做完的旧条目标 completed。
+2. 被废弃或被取代的条目**直接从 todo 里删除**——不要留着装 pending（假滞后），更不要标成 completed（污染审计）。
+3. 按当前真实拓扑重建剩余条目，Phase 编号与 checkpoint、worktree 分组同源。
+4. 废弃了什么、为什么废弃，写进 `conductor-state.md`。
+
+大规模变更时**整表重置**（一次 `write_todos` 覆盖），不要逐条打补丁；带着几十条历史残留去修，改不干净还会误导后续判断。
+
 ## Step 手册
 
 每个 Step 都是：开 `checkpoint` → 做事 → `rewind` 交接。
@@ -70,7 +93,7 @@ Brief 是本 skill 的重心，因为最贵的失败是"worker 很努力、方�
 
 同时要求 worker 持续把进展写进台账（[progress-ledger-template.md](assets/progress-ledger-template.md)），每完成一个可验证单元就更新，**先落盘再继续**；并明确不要一次性执行大段脚本——中途死掉既没有中间产物，也看不出停在哪一步。这一条直接决定中断的代价。
 
-*rewind 出口*：Phase 计划 + 基线 SHA + 各 brief 路径 → 进入 S2。
+*rewind 出口*：Phase 计划 + 基线 SHA + 各 brief 路径 → 进入 S2。规划完立刻把 todo 刷成与本 Phase 拓扑同源的样子（当前 Phase 到 Step 级，远处 Phase 只留占位）。
 
 ### S2 派发
 
@@ -159,6 +182,9 @@ OMP 在有排队的用户消息或系统建议时，会**跳过**该批次里尚
 - 攒到最后才回收，或删了归属不明的 worktree
 - 让 worker 一次性跑几百行脚本
 - 拿 worker 报告里的输出片段当验收证据
+- 一次性把全部 Phase 排成几十条 todo，然后再也不动它
+- 需求变更废弃了旧 Phase，却把对应 todo 留成 pending 或标成 completed
+- 等用户问"todo 是不是落后了"才重规划
 - 状态不明时用 `worker-stop` 并宣称"已停止"（该用 `worker-abandon`）
 
 ## 文件索引
