@@ -51,12 +51,12 @@ S1 规划 ──▶ S2 派发 ──▶ S3 等待观测 ──┬──▶ S5 �
 
 细则、转移表、checkpoint 语义与 report 模板见 [phase-step-protocol.md](references/phase-step-protocol.md)。
 
-三条最容易被忽略的纪律：
+四条最容易被忽略的纪律：
 
 - **结束 Step 的理由不只有"做完了"**。"我需要进入一个专门步骤处理突发事项"同样合法且推荐——正好用 rewind 把一堆轮询输出压成一句结论再进 S4。
 - **rewind 会丢弃 Step 内的中间上下文**。task id、dispatch id、基线 SHA、brief 与台账路径、owned 清单，必须写进 report 或落盘到 `conductor-state.md`。丢了 dispatch id，就再也无法向那个 worker 补发指令。
 - **看到 checkpoint 报告 = 你已经 rewind 过了**。rewind 通常不留独立调用记录，报告本身就是记录；不要怀疑，也不要重复调用（会报错）。
-- **`checkpoint` 创建失败就是"上一个 Step 没收尾"的答案**。不要靠记忆判断自己 rewind 过没有——直接开 checkpoint，失败即证据：说明还有一个活跃 checkpoint。此时**立刻补 rewind**（按模板把上一个 Step 的 report 写完），成功后再开新 checkpoint，然后才继续干活。绝不能忽略这次失败、带着过期 checkpoint 继续推进：那样两个 Step 的上下文会混在一起，最后一次 rewind 无法准确概述任何一个，而且 yield 会被拦住。反向的两种报错也各有定论——报"没有活跃 checkpoint"说明可以直接开新的；报"已经 rewound"说明就从保留的 report 继续，不要重试。
+- **`Checkpoint already active.` 要先做归属判定，再决定动作**。不要靠记忆判断自己 rewind 过没有——直接开 checkpoint，让报错说话；但报错只说"有一个活跃 checkpoint"，没说它是谁的。所以 checkpoint 的 `goal` 必须写成 `P<n>/S<m> <Step 名>：<关键 id>`，然后在上下文里向上找最近一条其后没有 rewind 报告的 `Checkpoint created.`，读它的 `Goal:`：**是本 Step 自己的**（刚开完又重试了一次）就忽略报错、直接继续干活，不 rewind 也不重开；**是上一个 Step/Phase 的**才立刻补 rewind 写完那个 Step 的 report，再开本 Step 的新 checkpoint；**找不到记录**（上下文被压缩）就按上一个 Step 处理。绝不能忽略冲突继续在别人的 checkpoint 下工作：两个 Step 上下文混在一起后，任何 report 都概述不准，yield 还会被拦。另两种报错无歧义：报"没有活跃 checkpoint"就直接开新的，报"已经 rewound"就从保留的 report 继续。
 
 ## Todo 是 Phase 拓扑的镜像
 
@@ -186,7 +186,8 @@ OMP 在有排队的用户消息或系统建议时，会**跳过**该批次里尚
 - 一次性把全部 Phase 排成几十条 todo，然后再也不动它
 - 需求变更废弃了旧 Phase，却把对应 todo 留成 pending 或标成 completed
 - 等用户问"todo 是不是落后了"才重规划
-- `checkpoint` 创建失败后不补 rewind，直接继续在过期 checkpoint 下工作
+- 撞上 `Checkpoint already active.` 后不做归属判定：要么忽略报错继续在上一个 Step 的过期 checkpoint 下工作，要么反过来把本 Step 刚开的 checkpoint 一把 rewind 掉
+- checkpoint 的 `goal` 写成"继续调查"这类无主语描述，导致冲突时无法判断活跃 checkpoint 属于哪个 Step
 - 状态不明时用 `worker-stop` 并宣称"已停止"（该用 `worker-abandon`）
 
 ## 文件索引
