@@ -57,6 +57,18 @@ Step 是 Phase 内部的最小调度单元，每个 Step 对应一次 checkpoint
 
 **（二）报告即证据**。当你在上下文里看到一份 checkpoint 报告，说明你**已经**执行过 rewind——rewind 通常不留独立的调用记录，报告本身就是它的记录。不要因为"没看到 rewind 的调用痕迹"而怀疑自己没 rewind，更不要再补一次（会报错）。
 
+**（三）忘记 rewind 的自愈流程**。跑得久了，你会记不清上一个 Step 到底 rewind 过没有。不要凭记忆猜，也不要为此翻历史——`checkpoint` 本身就是一次廉价、幂等的状态探针，直接开，让报错回答你：
+
+| 报错 | 含义 | 必须做什么 |
+|---|---|---|
+| `checkpoint` 报"已有活跃 checkpoint" | 上一个 Step 没收尾 | **立刻 `rewind`**，按模板补写上一个 Step 的 report（状态承载字段一个都不能少），成功后再开新 checkpoint，然后才继续干活 |
+| `rewind` 报"没有活跃 checkpoint" | 当前是干净状态 | 直接开新 checkpoint 进入下一个 Step |
+| `rewind` 报"该 checkpoint 已 rewound" | 已经收过尾了 | 从保留的 report 继续，不要重试 |
+
+最危险的处理方式是把第一种报错当噪音，忽略它继续推进。后果是复合的：两个 Step 的中间上下文混在一起，之后那一次 rewind 无论怎么写都无法准确概述任何一个 Step；报告边界与 Phase 拓扑脱钩；而且只要 checkpoint 还活跃，你 yield 时就会被拦住，最终还是得在信息已经糊掉的状态下补写 report。
+
+补写 report 时如果确实回忆不全，就写你能确认的部分，并显式标注"本 Step 的中间过程已丢失，以下为可确认事实"，同时补一次现场取证（`worker-list` / `orca_sweep.sh` / `conductor-state.md`）把 id 和资源清单捞回来——诚实的残缺报告比编造的完整报告有用得多。
+
 ## Rewind report 模板
 
 固定字段，缺一不可。写完 report 就等于交接给"下一个自己"。

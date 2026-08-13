@@ -56,6 +56,7 @@ S1 规划 ──▶ S2 派发 ──▶ S3 等待观测 ──┬──▶ S5 �
 - **结束 Step 的理由不只有"做完了"**。"我需要进入一个专门步骤处理突发事项"同样合法且推荐——正好用 rewind 把一堆轮询输出压成一句结论再进 S4。
 - **rewind 会丢弃 Step 内的中间上下文**。task id、dispatch id、基线 SHA、brief 与台账路径、owned 清单，必须写进 report 或落盘到 `conductor-state.md`。丢了 dispatch id，就再也无法向那个 worker 补发指令。
 - **看到 checkpoint 报告 = 你已经 rewind 过了**。rewind 通常不留独立调用记录，报告本身就是记录；不要怀疑，也不要重复调用（会报错）。
+- **`checkpoint` 创建失败就是"上一个 Step 没收尾"的答案**。不要靠记忆判断自己 rewind 过没有——直接开 checkpoint，失败即证据：说明还有一个活跃 checkpoint。此时**立刻补 rewind**（按模板把上一个 Step 的 report 写完），成功后再开新 checkpoint，然后才继续干活。绝不能忽略这次失败、带着过期 checkpoint 继续推进：那样两个 Step 的上下文会混在一起，最后一次 rewind 无法准确概述任何一个，而且 yield 会被拦住。反向的两种报错也各有定论——报"没有活跃 checkpoint"说明可以直接开新的；报"已经 rewound"说明就从保留的 report 继续，不要重试。
 
 ## Todo 是 Phase 拓扑的镜像
 
@@ -185,6 +186,7 @@ OMP 在有排队的用户消息或系统建议时，会**跳过**该批次里尚
 - 一次性把全部 Phase 排成几十条 todo，然后再也不动它
 - 需求变更废弃了旧 Phase，却把对应 todo 留成 pending 或标成 completed
 - 等用户问"todo 是不是落后了"才重规划
+- `checkpoint` 创建失败后不补 rewind，直接继续在过期 checkpoint 下工作
 - 状态不明时用 `worker-stop` 并宣称"已停止"（该用 `worker-abandon`）
 
 ## 文件索引

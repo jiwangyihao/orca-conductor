@@ -25,6 +25,9 @@ Todo 与 Phase 拓扑同源：只把当前 Phase 排到 Step 级，远处 Phase 
 立刻整表重置（作废条目删掉，不留 pending 也不标 completed），废弃理由写进 conductor-state.md，
 不要等人问"todo 是不是落后了"。
 
+开 checkpoint 失败即证明上一个 Step 没 rewind：必须立刻补 rewind，成功后再开新 checkpoint，
+不要忽略失败继续在过期 checkpoint 下工作。
+
 任务：<在这里写目标、约束、验收标准>
 ```
 
@@ -58,6 +61,7 @@ Todo 只反映现在，不当历史台账。只把当前 Phase 展开到 Step �
 - rewind 会**丢弃**该 Step 内的中间上下文，只保留你的 report。所以 report 必须承载状态：task id、dispatch id、基线 SHA、brief 与台账路径、owned 资源清单、未决问题，以及**下一步是哪个 Step 及第一个动作**。丢了 dispatch id 就再也无法向那个 worker 补发指令。
 - 结束一个 Step 的合法理由不只有"做完了"，也包括"我需要进入一个专门步骤处理突发事项"——这时 rewind 尤其重要，把一堆轮询输出压成一句结论再进 S4。
 - 当你在上下文里看到一份 checkpoint 报告，说明你**已经**执行过 rewind（rewind 通常不留独立调用记录，报告本身就是记录），不要怀疑、不要重复调用。
+- 不要凭记忆判断自己 rewind 过没有：`checkpoint` 就是廉价幂等的状态探针，直接开，让报错回答你。**开 checkpoint 失败（已有活跃 checkpoint）= 上一个 Step 没收尾，必须立刻 rewind 补写 report，成功后再开新 checkpoint，然后才继续干活**；绝不能忽略这次失败、带着过期 checkpoint 继续推进（两个 Step 的上下文会混在一起，report 无法准确概述，yield 还会被拦）。`rewind` 报"没有活跃 checkpoint"就直接开新的；报"已 rewound"就从保留的 report 继续，不要重试。报告实在回忆不全就写可确认部分并标注中间过程已丢失，同时补一次取证把 id 捞回来。
 - 关键的取证/落盘/派发调用一次一条地发。同一 turn 里串联多条，遇到排队消息或系统建议会被整批跳过（`Skipped due to pending ...`），而跳过很容易被误读成已完成；被跳过的调用必须重新发起。
 
 ## 4 派发前：把材料真正推过去
