@@ -80,6 +80,23 @@ Step 是 Phase 内部的最小调度单元，每个 Step 对应一次 checkpoint
 
 补写 report 时如果确实回忆不全，就写你能确认的部分，并显式标注"本 Step 的中间过程已丢失，以下为可确认事实"，同时补一次现场取证（`worker-list` / `orca_sweep.sh` / `conductor-state.md`）把 id 和资源清单捞回来——诚实的残缺报告比编造的完整报告有用得多。
 
+**（五）todo 变更只在"rewind 之后、下一个 checkpoint 之前"这个窗口里生效**。rewind 不只裁剪消息，它会把 todo 状态**从 checkpoint 之前的分支重新装载**——也就是回滚到你开这个 checkpoint 那一刻的样子。后果很直接：**checkpoint 活跃期间做的任何 todo 变更都是临时的，rewind 之后一律消失**，包括你刚标的 completed、刚删的作废条目、刚重建的整张表。
+
+所以标准时序是：
+
+```
+rewind（report 里带上 Todo 同步意图）
+   ↓  ← 唯一的 todo 持久化窗口：立刻核对并落地变更
+checkpoint（下一个 Step 开始）
+```
+
+具体要求：
+
+- **rewind 成功后的第一件事就是处理 todo**，不要先派发、不要先取证、更不要直接开下一个 checkpoint。此时对照一致性判据核对一遍（见下一节），把上一个 Step 的完成项、作废项、拓扑变化一次落地。开了新 checkpoint 再想起来改，等于白改。
+- **checkpoint 期间需要改 todo 也可以改**，那对当前这段推理有用（不至于自己迷路）；但要清楚它活不过 rewind。**唯一能穿过 rewind 的载体是 report 的"Todo 同步"段落**——把"应该怎么改"写在那里，rewind 之后照着重做一遍。
+- 因此 report 的"Todo 同步"不是事后汇报，而是**给下一个自己的待办指令**。写"已标完 P3 的三条"没有意义（那次操作已经被回滚了），要写"P3 三条标 completed；P4/P5 因需求变更删除；按 P6 拓扑重建"。
+- rewind 后重做时不要凭记忆信任 checkpoint 期间的操作结果，**重新看一眼当前 todo 实际长什么样**再改——你以为改过的东西大概率已经回到原样。
+
 ## Rewind report 模板
 
 固定字段，缺一不可。写完 report 就等于交接给"下一个自己"。
@@ -98,8 +115,8 @@ Step 是 Phase 内部的最小调度单元，每个 Step 对应一次 checkpoint
 ## 未决与风险
 - <未决问题；每条附"由哪个 Step 处理">
 
-## Todo 同步
-- <无需变更 | 已整表重置为 Phase <n> 拓扑；废弃了 <哪些条目> 因为 <原因>>
+## Todo 同步（rewind 后立刻执行的指令，不是已完成的汇报）
+- <无需变更 | 待做：<哪些条目标 completed>；<哪些条目删除> 因为 <原因>；按 Phase <n> 拓扑重建剩余条目>
 
 ## 下一步
 进入 <Step 编号 Step 名>，因为 <一句话理由>。
@@ -108,13 +125,15 @@ Step 是 Phase 内部的最小调度单元，每个 Step 对应一次 checkpoint
 
 "下一步"必须写死，尤其当你是**因为要处理突发专项而提前结束**这个 Step 的时候——否则 rewind 之后你只剩一份结论，会重新开始猜该干什么。
 
+注意"Todo 同步"和"下一步"的执行顺序：**先把 Todo 同步做完，再开下一个 checkpoint 去执行下一步**。todo 变更在 checkpoint 里做会被下一次 rewind 回滚。
+
 ## Phase 重规划与 Todo 重置
 
 Phase 计划不是签了字的合同。调度过程中最常见的变化是：上游结论被推翻、验收标准被修正、用户补充了新的执行要求——结果是某些**已规划但尚未执行的 Phase 部分或整体作废**，你直接跳到了一个新的 Phase。
 
 这种变化本身没问题，危险的是它留下的痕迹：那些作废的条目在 todo 里看起来只是"还没做"。于是 todo 显示你在 Phase 3，实际 checkpoint 和 worktree 已经在 Phase 6，两套 Phase 编号开始漂移，之后每一次汇报和判断都建立在错的地图上。
 
-一致性判据（每次 rewind 核对一次）：**todo 的 Phase 分组能否与"当前 checkpoint 的 Phase 编号 + 当前活跃 worktree 分组"逐一对上**。对不上就是 todo 已经落后，立即重置，不要等人来问。
+一致性判据（每次 rewind 后核对一次）：**todo 的 Phase 分组能否与"当前 checkpoint 的 Phase 编号 + 当前活跃 worktree 分组"逐一对上**。对不上就是 todo 已经落后，立即重置，不要等人来问。核对与重置都放在 rewind 之后、下一个 checkpoint 之前做——这是唯一能让变更留存的窗口。
 
 重置流程：
 
