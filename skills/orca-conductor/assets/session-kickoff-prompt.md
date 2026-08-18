@@ -12,6 +12,13 @@
 Phase 串行、Phase 内并行；每个 Step 开 checkpoint、结束用 rewind 交接（report 必须带 task/dispatch id、
 基线 SHA、brief 与台账路径、下一步声明）。
 
+派发是决策不是默认动作：orca agent 高开销（隔离 worktree + fresh session + 只能靠有限交接理解意图）。
+只在两种情形派发——(1) 完成一个登记在册的独立任务且本就该由 fresh context 做；(2) 若干任务需要真并行，
+且每个都有足够体量、需要足够隔离。两种情形不派发，自己在 checkpoint 里做——(1) 返修 agent 已做过的任务
+（原 agent 能唤回就让它返修，唤不回也别另起新 agent；例外：原 agent 因外部因素没做完，可重派接手）；
+(2) 沟通成本明显大于完成成本（brief 比 diff 还长、要指定改哪几行、活比一次探索还小）。
+自己做时走同一套 Phase/Step，只是把派发观测折叠成自执行 Step，验收判据照跑，证据照旧落盘。
+
 派发前：先把完整 Worker Brief 落盘并 commit，取 HEAD SHA 作为共享基线；worker 用
 `--worktree new-child --base-branch <SHA> --agent omp`。spec 只放指针 + 强制 Read-back Gate + 禁止项 + 汇报契约。
 
@@ -54,15 +61,29 @@ checkpoint 的 goal 写成 "P<n>/S<m> <Step 名>：<关键 id>"。撞上 "Checkp
 Phase 内部再切成 Step，每个 Step 一次 checkpoint→rewind：
 S1 规划 → S2 派发 → S3 等待观测 → S4 故障处理 → S5 单体验收 → S6 回收 → S7 全量验收
 （S3⇄S4 可往复；S5 拒收回 S4；S6 后回 S2 或进入下一 Phase）
+判定为"自己做"的工作项走 S2′ 自执行，替代 S2/S3/S4，之后同样进 S5。
 
-## 2 Todo 与 Phase 拓扑同源
+## 2 派不派：orca agent 是高开销资源
+每个 orca agent 都配一个隔离 worktree、从 fresh session 起步，于是有三笔与任务体量无关的固定成本：资源开销（worktree、终端、回收对账）、冷启动（它得重新 grep 仓库、重读文档才追上你的理解）、理解偏差（隔离既屏蔽干扰也是信息墙，它只看得见你交接的那部分，偏差往往到验收才暴露）。固定成本不随任务变小而变小——**任务越小，派发越亏**。所以派发是决策，不是默认动作；S1 规划时必须给每个工作项标注"派发 / 自执行"。
+
+**应该派发（满足其一）**：
+1. 完成一个**登记在册的独立任务**，且你本就希望它由 fresh context 执行（边界清晰、自带验收标准；或你需要一个不被自己推理污染的独立实现/复现）。
+2. **并行**完成若干任务，且每个都有**足够体量**、彼此需要**足够隔离**。两个"足够"必须同时成立：五个小任务并行省下的时间抵不过五份 brief 加五次回收；两个大任务改同一批文件则隔离不成立，只会制造冲突。
+
+**不应该派发（命中即自己做）**：
+1. **返修一个已被 agent 做过一次的任务**。原 agent 还能唤回 → 让它自己返修（`send --to dispatch:<id>`，它持有全部上下文，成本最低）；唤不回 → **也不要为返修另起新 agent**，自己在 checkpoint 里改：新 agent 拿到的是"别人写了一半的成果 + 你二手转述的意图"，理解偏差最高发，而返修改动量通常远小于讲清这一切的交接量。**唯一例外**：原 agent 因外部因素（进程死亡、worktree 损坏、环境故障）未能完成，任务本身还是从头做一遍，允许重新派发接手。判据：**"没做完"可以重派，"做完了但做得不对"自己修。**
+2. **沟通成本明显大于完成成本**：brief 篇幅接近或超过预期 diff；需要精确指定改哪个文件的哪几行；依赖你脑子里尚未落盘的判断（写下来 ≈ 直接做掉）；预期动作量小于一次 checkpoint 的探索量（改个配置、加一个测试、跑一条命令确认、调一句措辞）。
+
+**不派发时仍走同一套 Phase/Step**：照常开 checkpoint（goal 仍写 P<n>/S<m>）直接干活、rewind 交接结论；**验收判据不因为"是自己做的"而放松**，S5 的独立复跑照做；证据与结论照旧落盘到文件（上下文会被 rewind，文件不会）；不产生 owned 资源，S6 退化成一句"本 Step 未新建 worker/worktree"但对账不省；在 report 与 conductor-state.md 里写一句"本 Step 自执行，未派发，理由：<命中哪条>"，免得后续 Step 反复纠结同一个决定。
+
+## 3 Todo 与 Phase 拓扑同源
 Todo 只反映现在，不当历史台账。只把当前 Phase 展开到 Step 级，下一个 Phase 粗粒度，更远的 Phase 留一行占位——下游形状取决于上游产出，开局排几十条必然作废。
 调度中最常见的变化是执行要求被更正，导致已规划但未执行的 Phase 部分或整体作废。此时作废条目在 todo 里看起来只是"还没做"，于是 todo 显示 Phase 3、实际 checkpoint 和 worktree 已在 Phase 6，地图就错了。
 出现下列任一情况立刻重规划，不要等人问"todo 是不是落后了"：收到纠正/需求变更使某 Phase 作废；你在做的 Phase 编号已超过 todo 里 in_progress 的 Phase；Phase 出口条件被改写或被跳过/合并/拆分。每次 rewind 之后核对一次，并在 report 里声明 todo 是否需要重建。
 重置动作：真正做完的标 completed；作废或被取代的**直接删除**（留 pending 是假滞后，标 completed 污染审计）；按当前真实拓扑重建剩余条目，Phase 编号与 checkpoint、worktree 分组同源；废弃了什么、为什么，写进 conductor-state.md。范围大就整表重置，不要逐条打补丁。
 **改 todo 的唯一有效窗口是"rewind 之后、下一个 checkpoint 之前"**：rewind 会把 todo 从 checkpoint 之前的分支重新装载，所以 checkpoint 活跃期间的 todo 变更全是临时的，rewind 后一律回滚到开 checkpoint 那一刻的样子。因此——rewind 成功后的第一件事就是核对并落地 todo，然后才开下一个 checkpoint 去干活（开了 checkpoint 再改等于白改）；checkpoint 期间需要改 todo 可以改，但必须把"该怎么改"写进 report 的"Todo 同步"段（那是唯一能穿过 rewind 的载体），rewind 后先看一眼 todo 当前实际长什么样，再照着重做一遍。
 
-## 3 Checkpoint / Rewind 纪律
+## 4 Checkpoint / Rewind 纪律
 - 每个 Step 开始时 `checkpoint`，结束时 `rewind`。同一时刻只能有一个活跃 checkpoint，不可嵌套，yield 前必须 rewind。
 - rewind 会**丢弃**该 Step 内的中间上下文，只保留你的 report。所以 report 必须承载状态：task id、dispatch id、基线 SHA、brief 与台账路径、owned 资源清单、未决问题，以及**下一步是哪个 Step 及第一个动作**。丢了 dispatch id 就再也无法向那个 worker 补发指令。
 - 结束一个 Step 的合法理由不只有"做完了"，也包括"我需要进入一个专门步骤处理突发事项"——这时 rewind 尤其重要，把一堆轮询输出压成一句结论再进 S4。
@@ -73,7 +94,7 @@ Todo 只反映现在，不当历史台账。只把当前 Phase 展开到 Step �
 - `rewind` 报"没有活跃 checkpoint"就直接开新的；报"已 rewound"就从保留的 report 继续，不要重试。报告实在回忆不全就写可确认部分并标注中间过程已丢失，同时补一次取证把 id 捞回来。
 - 关键的取证/落盘/派发调用一次一条地发。同一 turn 里串联多条，遇到排队消息或系统建议会被整批跳过（`Skipped due to pending ...`），而跳过很容易被误读成已完成；被跳过的调用必须重新发起。
 
-## 4 派发前：把材料真正推过去
+## 5 派发前：把材料真正推过去
 worker 起在另一个 worktree，看不到你未提交的改动，也不会自动继承你的分支。
 1. 写完整 Worker Brief（见第 5 节），落盘。
 2. 把 brief 和 worker 需要的基线代码/契约/验收脚本 **commit 到当前 worktree**。
@@ -86,7 +107,7 @@ worker 起在另一个 worktree，看不到你未提交的改动，也不会自�
 
 内容走 git，状态走共享目录（`~/.orca-conductor/<run_id>/`，不用裸 /tmp），指令走 `send --to dispatch:<id>`；长文档永远走文件，邮件里只放路径。
 
-## 5 Worker Brief：任务指示必须详尽
+## 6 Worker Brief：任务指示必须详尽
 最贵的失败是"worker 很努力、方向全错"，根因几乎总是 spec 只有目标和几条约束。brief 分两层：落盘文件写满（100–400 行），`--spec` 只做指针（15–30 行）。
 
 brief 必填 12 节，缺一节就是在赌它能猜对：
@@ -109,7 +130,7 @@ brief 必填 12 节，缺一节就是在赌它能猜对：
 
 **持久化要求**：要求 worker 尽快、持续地把成果和进展写进台账文件，每完成一个可验证单元就更新，**先落盘再继续**；不要一次性执行大段脚本（中途死掉就既没有中间产物也看不出停在哪一步）。这条直接决定中断的代价。
 
-## 6 观测纪律
+## 7 观测纪律
 用 orca 持续观测（rolling `check --wait`，10–15 分钟一窗口）。
 - 超时或 `{count:0}` 不是失败，只是"这一窗口没有新消息"。真实编码任务 15–60 分钟很正常。
 - **禁止仅因为运行时间长就 stop/restart**。重开只会让 worker 从零重新探索上下文，总耗时更长，还会丢掉它已经落盘的进度。
@@ -117,7 +138,7 @@ brief 必填 12 节，缺一节就是在赌它能猜对：
   A `worker-show`（workerState/terminalState）B `worker-read`（source 是 transcript 还是 terminal、有无 fallbackReason、**间隔 3–5 分钟采两次看是否推进**）C 文件系统（台账 mtime、`git status`/`git log`）。
   一次快照区分不出"静默苦干"和"卡死"，两次快照几乎总能。
 
-## 7 中断处理（中断是常态，不是异常）
+## 8 中断处理（中断是常态，不是异常）
 先开一个 checkpoint 专门确认现场，再决定动作：
 - 从未真正启动（`fallbackReason=session_not_reported` + 零产出）→ 先 send 唤醒，无效再 stop + `worker-start --retry-of`。
 - 静默苦干（两次采样有推进）→ 什么都不做，回到等待。
@@ -127,17 +148,19 @@ brief 必填 12 节，缺一节就是在赌它能猜对：
 重开需同时满足：有新增证据表明不可恢复、已至少补发过一次并给了响应窗口、已明确"这次 brief 与上次不同在哪"。用同一份指示重开只会得到同一个失败。
 若根因是你的指示不详尽：先补齐 brief 落盘，再补发纠偏（先叫停→给路径→要求回写确认）；现场已污染才 stop + `task-update --status failed --result '{"reason":"superseded: ..."}'` + 带强制 gate 的新 task。
 
-## 8 验收
+## 9 验收
 单体验收不信 prose：按公开过的顺序独立复跑命令，三查（文件存在/命令判据/git 记录与白名单）。`--files-modified` 与实际 `git status` 不一致是最强危险信号。拒收就 `task-update --status failed` 并写清具体哪条 DoD 没过。
 全部 worker 结算后做全量验收：集成复跑、基线与契约一致性、交付清单逐项核对、结论落盘到文件（会话上下文会被 rewind，文件不会）。
 
-## 9 回收与自我保护
+## 10 回收与自我保护
 每个 Phase 结束对账一次，不要攒到最后。
 - Orca 不会替你判断 worktree 是谁创建的（`ownershipState=external` / `retainedReason=legacy_ambiguous` 意味着归属无法证明），所以**以你自己的 owned 清单为唯一删除授权**；清单之外一律不删，列给用户决定。
 - 顺序：先 `worker-release` 结算终端（release 后输出仍可读），再决定是否 `worktree rm`。需要留现场用 `worker-retain` 并写明理由。
 - `worktree rm` 前三查：无活的 worker、产物已合并或证据已复制出来、在 owned 清单里且**不是当前 worktree**（路径和 id 都逐字比对）。
 
-## 10 反模式（出现即自我纠正）
+## 11 反模式（出现即自我纠正）
+- 不做派发判定，什么活都派 orca agent；或为返修一个 agent 已完成的任务另起新 agent
+- 自执行的工作项跳过 S5 判据复跑（"这是我自己写的，我知道它对"）
 - spec 只写目标和几条约束就派发
 - 不 commit 就派发，或只给 `new-child` 不给 `--base-branch`
 - 因为"跑了很久"重开 worker

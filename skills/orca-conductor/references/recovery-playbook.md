@@ -94,6 +94,8 @@ body:
 3. 按情况选择：现场还可用 → 补发纠偏指令 + gate；现场已污染 → `worker-stop` / `worker-abandon` → `task-update --status failed --result '{"reason":"superseded: brief underspecified, replaced by <path>"}'` → 新建 task，spec 里**强制 read-back gate**。
 4. 在 rewind report 里记一条"指示缺陷类型"，避免下个 Phase 又犯。
 
+注意第 3 步里"新建 task"的适用边界：它针对**任务还没做完**的情形（方向错到产物不可用，等于要从头做一遍）。如果任务其实已经完成、只是有瑕疵需要返修，就不要另起新 agent——优先唤回原 agent，唤不回就自己在 checkpoint 里改。判定见 [phase-step-protocol.md](phase-step-protocol.md) 的派发决策一节。
+
 ## 取证时的坑
 
 - `worker-read` 的 cursor **绑定在具体 source 上**。若报 `source_changed`，重新从头读一次，不要拿旧 cursor 继续翻。

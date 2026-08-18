@@ -1,6 +1,6 @@
 ---
 name: orca-conductor
-description: 把当前会话变成 Orca 多 Agent 调度会话（coordinator）的作业规范：按执行拓扑划分串行 Phase 与 Step、用 checkpoint/rewind 压缩调度上下文并交接状态、编写详尽的 Worker Brief 与强制 Read-back Gate、通过 git 基线与共享目录把上下文推给隔离 worktree 中的 worker、用三证据法观测与恢复意外中断的 worker、独立复跑验收产出、按 Phase 回收 worker 与自建 worktree。适用于"调度会话/coordinator/派发多个 Agent/并行 worker/多 worktree 协作/worker 卡住了不响应/要不要重开 Agent/任务指示写得太简略/验收 worker 产出/回收 worktree"等场景。CLI 参数细节以 Orca 自带的 orchestration skill 为准，本 skill 只管调度纪律。
+description: 把当前会话变成 Orca 多 Agent 调度会话（coordinator）的作业规范：判断一项工作该不该派 orca agent（agent 是高开销资源：隔离 worktree + fresh session + 有限交接带来的理解偏差）、按执行拓扑划分串行 Phase 与 Step、用 checkpoint/rewind 压缩调度上下文并交接状态、编写详尽的 Worker Brief 与强制 Read-back Gate、通过 git 基线与共享目录把上下文推给隔离 worktree 中的 worker、用三证据法观测与恢复意外中断的 worker、独立复跑验收产出、按 Phase 回收 worker 与自建 worktree。适用于"调度会话/coordinator/派发多个 Agent/并行 worker/这活儿要不要派 agent/小任务自己做还是派 worker/返修要不要重开 agent/多 worktree 协作/worker 卡住了不响应/任务指示写得太简略/验收 worker 产出/回收 worktree"等场景。CLI 参数细节以 Orca 自带的 orchestration skill 为准，本 skill 只管调度纪律。
 author: zhangyihao.jwyh
 ---
 
@@ -8,7 +8,7 @@ author: zhangyihao.jwyh
 
 调度会话的产出不是代码，而是**被验收过的 worker 成果 + 一份可追溯的调度记录**。
 
-调度会话失败的方式很少，而且高度重复：任务指示太简略导致 worker 重新探索并重走已否决的路；上下文没真正推到 worker 的 worktree；因为"跑得久"就重开 Agent，把已有进度全丢掉；上下文被轮询垃圾填满后忘掉 dispatch id；回收攒到最后已经分不清哪个 worktree 是谁的。本 skill 就是针对这五件事的纪律。
+调度会话失败的方式很少，而且高度重复：什么活都派 agent，用五份 brief 换一次本可以顺手做完的改动；任务指示太简略导致 worker 重新探索并重走已否决的路；上下文没真正推到 worker 的 worktree；因为"跑得久"就重开 Agent，把已有进度全丢掉；上下文被轮询垃圾填满后忘掉 dispatch id；回收攒到最后已经分不清哪个 worktree 是谁的。本 skill 就是针对这几件事的纪律。
 
 **何时用**：需要把一个任务拆给多个 Agent 并行推进、需要监督/等待/验收 worker、需要协调有依赖关系的多阶段工作。
 **何时不用**：一次性的完整交接（把活儿整体交给另一个 Agent 就不管了）、纯粹的终端控制或 worktree 管理——那些用 Orca 的 `orca-cli` skill。单个 Agent 能做完的事不要引入调度。
@@ -27,15 +27,32 @@ orca worktree current --json     # 记下自己的 path 与 id，标注 PROTECTE
 
 违反任一条，后面所有努力都可能白费。
 
-1. **先落盘，再派发**：Worker Brief 写完并 commit，取到基线 SHA，才允许 `task-create`。
-2. **spec 只做指针**：长上下文放文件，`--spec` 15–30 行，指向 brief 绝对路径。
-3. **Read-back Gate 强制**：worker 必须先回写"已读文件 + 实际 `git log -1` + brief 的 sha256 + 分步计划"，收到你的 `reply` 前不得改任何业务文件。
-4. **谱系不等于基线**：`new-child` 只决定 Orca 谱系；git 基线必须用 `--base-branch <commit SHA>` 显式指定。
-5. **时间不是证据**：禁止仅因运行时长 stop/restart worker。升级必须有新增证据。
-6. **补发优先于重开**：`send --to dispatch:<id>` 能解决的问题，不要用重开解决。
-7. **每个 Step 一次 checkpoint→rewind**，report 必须承载 id 与下一步。
-8. **只回收自己 owned 清单里的资源**，当前 worktree 永不删。
-9. **Todo 与 Phase 拓扑同源**：todo 的 Phase 分组必须能和当前 checkpoint 的 Phase 编号、活跃 worktree 分组逐一对上；对不上就是 todo 已经落后。
+1. **派发是决策，不是默认动作**：先过派发判定（下一节），命中"不应派发"就自己在 checkpoint 里做。
+2. **先落盘，再派发**：Worker Brief 写完并 commit，取到基线 SHA，才允许 `task-create`。
+3. **spec 只做指针**：长上下文放文件，`--spec` 15–30 行，指向 brief 绝对路径。
+4. **Read-back Gate 强制**：worker 必须先回写"已读文件 + 实际 `git log -1` + brief 的 sha256 + 分步计划"，收到你的 `reply` 前不得改任何业务文件。
+5. **谱系不等于基线**：`new-child` 只决定 Orca 谱系；git 基线必须用 `--base-branch <commit SHA>` 显式指定。
+6. **时间不是证据**：禁止仅因运行时长 stop/restart worker。升级必须有新增证据。
+7. **补发优先于重开**：`send --to dispatch:<id>` 能解决的问题，不要用重开解决。
+8. **每个 Step 一次 checkpoint→rewind**，report 必须承载 id 与下一步。
+9. **只回收自己 owned 清单里的资源**，当前 worktree 永不删。
+10. **Todo 与 Phase 拓扑同源**：todo 的 Phase 分组必须能和当前 checkpoint 的 Phase 编号、活跃 worktree 分组逐一对上；对不上就是 todo 已经落后。
+
+## 派不派：agent 是高开销资源
+
+每个 orca agent 都配一个隔离 worktree、从 fresh session 起步，于是有三笔**与任务体量无关的固定成本**：资源开销（worktree、终端、回收对账）、冷启动（它要重新 grep 仓库、重读设计文档才追上你的理解）、以及**理解偏差**（隔离既屏蔽干扰也是信息墙，它只看得见你交接的那部分，偏差往往到验收才暴露）。固定成本不随任务变小而变小——**任务越小，派发越亏**。
+
+**应该派发**（满足其一）：
+
+- 完成一个**登记在册的独立任务**，且你本就希望它由 fresh context 执行（边界清晰、自带验收标准，或你需要一个不被自己推理污染的独立实现/复现）。
+- **并行**完成若干任务，且每个都有**足够体量**、彼此需要**足够隔离**。两个"足够"必须同时成立：五个小任务并行省下的时间抵不过五份 brief 加五次回收；两个大任务改同一批文件则隔离不成立，只会制造冲突。
+
+**不应该派发**（命中即自己做）：
+
+- **返修已被 agent 做过一次的任务**。原 agent 还能唤回就让它自己返修（`send --to dispatch:<id>`，它持有全部上下文）；唤不回也**不要为返修另起新 agent**——新 agent 拿到的是"别人写了一半的成果 + 你二手转述的意图"，理解偏差最高发，而返修的改动量通常远小于讲清这一切的交接量。唯一例外：原 agent 因**外部因素**（进程死亡、worktree 损坏、环境故障）未能完成，任务本身还是从头做一遍，允许重新派发接手。判据一句话：**"没做完"可以重派，"做完了但做得不对"自己修。**
+- **沟通成本明显大于完成成本**。brief 篇幅接近预期 diff、需要精确指定改哪几行、依赖你脑子里尚未落盘的判断、或预期动作量小于一次 checkpoint 的探索量（改个配置、加一个测试、跑一条命令确认）——都属于此类。
+
+**不派发时仍走同一套 Phase/Step**，只是把 S2/S3/S4 折叠成自执行 Step（S2′）：照常开 checkpoint 直接干活、rewind 交接；**验收判据不因为"自己做的"而放松**，S5 照跑；证据照旧落盘到文件；S6 退化成"本 Step 未新建资源"但对账不省；report 与 `conductor-state.md` 里写一句"本 Step 自执行，未派发，理由：X"。判定细则与识别特征见 [phase-step-protocol.md](references/phase-step-protocol.md)。
 
 ## 会话骨架
 
@@ -44,9 +61,10 @@ Phase 之间串行，Phase 内部并行。切 Phase 的依据是"下一批工作
 Phase 内部按 Step 推进，每个 Step 对应一次 checkpoint→rewind：
 
 ```
-S1 规划 ──▶ S2 派发 ──▶ S3 等待观测 ──┬──▶ S5 单体验收 ──▶ S6 回收 ──┬──▶ 下一 Phase 的 S1
-                          ▲          │                    ▲        └──▶ S7 全量验收
-                          └── S4 故障处理 ◀────────────────┘
+S1 规划 ──┬──▶ S2 派发 ──▶ S3 等待观测 ──┬──▶ S5 单体验收 ──▶ S6 回收 ──┬──▶ 下一 Phase 的 S1
+          │              ▲          │                    ▲        └──▶ S7 全量验收
+          │              └── S4 故障处理 ◀────────────────┘
+          └──▶ S2′ 自执行 ───────────────▶（同样进 S5，判据照跑）
 ```
 
 细则、转移表、checkpoint 语义与 report 模板见 [phase-step-protocol.md](references/phase-step-protocol.md)。
@@ -94,7 +112,9 @@ Todo 列表的唯一作用是让人一眼看出"现在在哪个 Phase、这个 P
 
 ### S1 规划
 
-拆解执行拓扑 → 定 Phase 边界与出口条件 → 为本 Phase 每个 worker 写 Worker Brief → commit → 取基线 SHA。
+拆解执行拓扑 → 定 Phase 边界与出口条件 → **给每个工作项标注派发 / 自执行** → 为要派发的写 Worker Brief → commit → 取基线 SHA。
+
+标注这一步不能省：跳过它就会退化成"什么都派"，而这是最贵的默认行为之一。判定见上面的[派不派](#派不派agent-是高开销资源)一节；判定结论要写进 report 的"执行方式"字段。
 
 Brief 是本 skill 的重心，因为最贵的失败是"worker 很努力、方向全错"。必填 12 节、Read-back Gate 的写法、正反例对照见 [worker-brief.md](references/worker-brief.md)，直接套 [worker-brief-template.md](assets/worker-brief-template.md)。
 
@@ -183,6 +203,9 @@ OMP 在有排队的用户消息或系统建议时，会**跳过**该批次里尚
 
 出现即自我纠正：
 
+- 不做派发判定，什么活都派 orca agent（固定成本在小任务上占比最高）
+- 为返修一个 agent 已完成的任务另起新 agent，而不是唤回原 agent 或自己改
+- 自执行的工作项跳过 S5 判据复跑（"这是我自己写的，我知道它对"）
 - spec 只写目标和几条约束就派发
 - 不 commit 就派发，或只给 `new-child` 不给 `--base-branch`
 - 因为"跑了很久"重开 worker
