@@ -133,22 +133,31 @@ Step 是 Phase 内部的最小调度单元，每个 Step 对应一次 checkpoint
 
 补写 report 时如果确实回忆不全，就写你能确认的部分，并显式标注"本 Step 的中间过程已丢失，以下为可确认事实"，同时补一次现场取证（`worker-list` / `orca_sweep.sh` / `conductor-state.md`）把 id 和资源清单捞回来——诚实的残缺报告比编造的完整报告有用得多。
 
-**（五）todo 变更只在"rewind 之后、下一个 checkpoint 之前"这个窗口里生效**。rewind 不只裁剪消息，它会把 todo 状态**从 checkpoint 之前的分支重新装载**——也就是回滚到你开这个 checkpoint 那一刻的样子。后果很直接：**checkpoint 活跃期间做的任何 todo 变更都是临时的，rewind 之后一律消失**，包括你刚标的 completed、刚删的作废条目、刚重建的整张表。
+**（五）todo 分两级，只有拓扑级受"rewind 之后、下一个 checkpoint 之前"这个窗口约束**。rewind 不只裁剪消息，它会把 todo 状态**从 checkpoint 之前的分支重新装载**——也就是回滚到你开这个 checkpoint 那一刻的样子。**checkpoint 活跃期间做的任何 todo 变更都活不过 rewind**。但这个事实对两级 todo 的含义正好相反：
 
-所以标准时序是：
+| 层级 | 内容举例 | 生存期 | 何时改 |
+|---|---|---|---|
+| **拓扑级** | Phase / Step 条目；与 checkpoint 编号、活跃 worktree 分组同源 | 跨 checkpoint 长期存在 | **只在 rewind 之后、下一个 checkpoint 之前** |
+| **Step 内细粒度** | 本 Step 的操作清单：待读的 3 个文件、待发的 5 条 orca 命令、待核对的 4 个 worker、故障处理的取证步骤 | 只活在本 checkpoint 内 | **就在 checkpoint 内实时维护，鼓励这么做** |
+
+细粒度项被 rewind 清掉**不是数据丢失，而是正确的垃圾回收**：它们和轮询回执、终端片段一样属于"过程"，不属于"结论"，本来就不该被带进下一个 Step。所以别把这条规则误读成"checkpoint 期间不许动 todo"——一个 Step 内部有十几个动作时，不维护清单反而会漏步骤。
+
+拓扑级的时序：
 
 ```
 rewind（report 里带上 Todo 同步意图）
-   ↓  ← 唯一的 todo 持久化窗口：立刻核对并落地变更
-checkpoint（下一个 Step 开始）
+   ↓  ← 唯一的拓扑级 todo 持久化窗口：立刻核对并落地变更
+checkpoint（下一个 Step 开始，此后只维护 Step 内细粒度项）
 ```
 
 具体要求：
 
-- **rewind 成功后的第一件事就是处理 todo**，不要先派发、不要先取证、更不要直接开下一个 checkpoint。此时对照一致性判据核对一遍（见下一节），把上一个 Step 的完成项、作废项、拓扑变化一次落地。开了新 checkpoint 再想起来改，等于白改。
-- **checkpoint 期间需要改 todo 也可以改**，那对当前这段推理有用（不至于自己迷路）；但要清楚它活不过 rewind。**唯一能穿过 rewind 的载体是 report 的"Todo 同步"段落**——把"应该怎么改"写在那里，rewind 之后照着重做一遍。
+- **rewind 成功后的第一件事就是处理拓扑级 todo**，不要先派发、不要先取证、更不要直接开下一个 checkpoint。此时对照一致性判据核对一遍（见下一节），把上一个 Step 的完成项、作废项、拓扑变化一次落地。开了新 checkpoint 再想起来改，等于白改。
+- **checkpoint 期间发现拓扑要变**（某个 Phase 作废、需要多插一轮验收、Step 顺序要调整），不要在 checkpoint 里试图固化它——**唯一能穿过 rewind 的载体是 report 的"Todo 同步"段落**，把"应该怎么改"写在那里，rewind 之后照着落地。
 - 因此 report 的"Todo 同步"不是事后汇报，而是**给下一个自己的待办指令**。写"已标完 P3 的三条"没有意义（那次操作已经被回滚了），要写"P3 三条标 completed；P4/P5 因需求变更删除；按 P6 拓扑重建"。
-- rewind 后重做时不要凭记忆信任 checkpoint 期间的操作结果，**重新看一眼当前 todo 实际长什么样**再改——你以为改过的东西大概率已经回到原样。
+- 落地前先用 `todo view` 看一眼当前实际状态，不要凭记忆信任 checkpoint 期间的操作结果——细粒度项已经消失，拓扑也回到了开 checkpoint 那一刻。
+- **两级之间不要互相污染**：checkpoint 内维护细粒度项只用 `append`（挂到当前 Phase）配合 `start` / `done`；**不要用 `init`**，整表重置属于拓扑级动作，它会抹掉你在本 Step 内赖以定位的 Phase 结构——虽然 rewind 会还原，但本 Step 剩下的时间里你已经没有地图了。反过来，拓扑级的 `init` / 删 Phase 只在 rewind 后的窗口做。
+- 一个细粒度项做到一半发现它其实是一个新的 Phase 或 Step（比如"顺手核对一下"膨胀成一整轮验收），那它已经升级成拓扑变化：按上面第二条处理，写进 report，别在 checkpoint 里硬塞。
 
 ## Rewind report 模板
 
@@ -179,7 +188,7 @@ checkpoint（下一个 Step 开始）
 
 "下一步"必须写死，尤其当你是**因为要处理突发专项而提前结束**这个 Step 的时候——否则 rewind 之后你只剩一份结论，会重新开始猜该干什么。
 
-注意"Todo 同步"和"下一步"的执行顺序：**先把 Todo 同步做完，再开下一个 checkpoint 去执行下一步**。todo 变更在 checkpoint 里做会被下一次 rewind 回滚。
+注意"Todo 同步"和"下一步"的执行顺序：**先把 Todo 同步做完，再开下一个 checkpoint 去执行下一步**。拓扑级 todo 变更在 checkpoint 里做会被下一次 rewind 回滚；Step 内细粒度项则相反，就该留在 checkpoint 里。
 
 ## Phase 重规划与 Todo 重置
 
@@ -187,7 +196,7 @@ Phase 计划不是签了字的合同。调度过程中最常见的变化是：�
 
 这种变化本身没问题，危险的是它留下的痕迹：那些作废的条目在 todo 里看起来只是"还没做"。于是 todo 显示你在 Phase 3，实际 checkpoint 和 worktree 已经在 Phase 6，两套 Phase 编号开始漂移，之后每一次汇报和判断都建立在错的地图上。
 
-一致性判据（每次 rewind 后核对一次）：**todo 的 Phase 分组能否与"当前 checkpoint 的 Phase 编号 + 当前活跃 worktree 分组"逐一对上**。对不上就是 todo 已经落后，立即重置，不要等人来问。核对与重置都放在 rewind 之后、下一个 checkpoint 之前做——这是唯一能让变更留存的窗口。
+一致性判据（每次 rewind 后核对一次）：**todo 的 Phase 分组能否与"当前 checkpoint 的 Phase 编号 + 当前活跃 worktree 分组"逐一对上**（只看拓扑级条目，Step 内细粒度项此时已被 rewind 清掉，不参与对账）。对不上就是 todo 已经落后，立即重置，不要等人来问。核对与重置都放在 rewind 之后、下一个 checkpoint 之前做——这是唯一能让变更留存的窗口。
 
 重置流程：
 

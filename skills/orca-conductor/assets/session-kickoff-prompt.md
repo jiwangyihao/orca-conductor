@@ -34,9 +34,10 @@ Todo 与 Phase 拓扑同源：只把当前 Phase 排到 Step 级，远处 Phase 
 立刻整表重置（作废条目删掉，不留 pending 也不标 completed），废弃理由写进 conductor-state.md，
 不要等人问"todo 是不是落后了"。
 
-rewind 会重置 todo：checkpoint 期间的 todo 变更都是临时的，rewind 后会回滚。所以 todo 变更只在
-rewind 之后、下一个 checkpoint 之前做，rewind 成功后第一件事就是核对并落地 todo，再开新 checkpoint；
-checkpoint 期间要改就把"该怎么改"写进 report 的 Todo 同步段，rewind 后重新检查一遍再重做。
+rewind 会重置 todo，所以 todo 分两级对待：拓扑级（Phase/Step 条目）只在 rewind 之后、下一个 checkpoint
+之前改——rewind 成功后第一件事就是核对并落地，checkpoint 期间发现拓扑要变就把"该怎么改"写进 report 的
+Todo 同步段，rewind 后 todo view 看一眼实际状态再落地；Step 内细粒度 todo（本 Step 的操作清单）就在
+checkpoint 里实时维护，用 append/start/done、不要用 init，它被 rewind 清掉正是预期行为。
 
 checkpoint 的 goal 写成 "P<n>/S<m> <Step 名>：<关键 id>"。撞上 "Checkpoint already active." 时先判归属：
 看上下文里最近那条未被 rewind 收尾的 "Checkpoint created." 的 Goal——是本 Step 自己的就忽略报错继续干活，
@@ -85,7 +86,10 @@ Todo 只反映现在，不当历史台账。只把当前 Phase 展开到 Step �
 调度中最常见的变化是执行要求被更正，导致已规划但未执行的 Phase 部分或整体作废。此时作废条目在 todo 里看起来只是"还没做"，于是 todo 显示 Phase 3、实际 checkpoint 和 worktree 已在 Phase 6，地图就错了。
 出现下列任一情况立刻重规划，不要等人问"todo 是不是落后了"：收到纠正/需求变更使某 Phase 作废；你在做的 Phase 编号已超过 todo 里 in_progress 的 Phase；Phase 出口条件被改写或被跳过/合并/拆分。每次 rewind 之后核对一次，并在 report 里声明 todo 是否需要重建。
 重置动作：真正做完的标 completed；作废或被取代的**直接删除**（留 pending 是假滞后，标 completed 污染审计）；按当前真实拓扑重建剩余条目，Phase 编号与 checkpoint、worktree 分组同源；废弃了什么、为什么，写进 conductor-state.md。范围大就整表重置，不要逐条打补丁。
-**改 todo 的唯一有效窗口是"rewind 之后、下一个 checkpoint 之前"**：rewind 会把 todo 从 checkpoint 之前的分支重新装载，所以 checkpoint 活跃期间的 todo 变更全是临时的，rewind 后一律回滚到开 checkpoint 那一刻的样子。因此——rewind 成功后的第一件事就是核对并落地 todo，然后才开下一个 checkpoint 去干活（开了 checkpoint 再改等于白改）；checkpoint 期间需要改 todo 可以改，但必须把"该怎么改"写进 report 的"Todo 同步"段（那是唯一能穿过 rewind 的载体），rewind 后先看一眼 todo 当前实际长什么样，再照着重做一遍。
+**todo 分两级，改的时机不同。** rewind 会把 todo 从 checkpoint 之前的分支重新装载，checkpoint 期间的变更活不过 rewind——但这对两级 todo 的含义正好相反：
+- **拓扑级**（Phase / Step 条目，与 checkpoint 编号、worktree 分组同源）：**只在 rewind 之后、下一个 checkpoint 之前改**。rewind 成功后的第一件事就是核对并落地，然后才开下一个 checkpoint 去干活（开了再改等于白改）。checkpoint 期间发现拓扑要变（Phase 作废、要多插一轮验收），不要在 checkpoint 里固化，把"该怎么改"写进 report 的"Todo 同步"段——那是唯一能穿过 rewind 的载体；落地前先 `todo view` 看实际状态，别凭记忆。
+- **Step 内细粒度**（本 Step 的操作清单：待读的文件、待发的 orca 命令、待核对的 worker）：**就在 checkpoint 里实时维护**，这是鼓励的。它被 rewind 清掉不是丢数据，而是正确的垃圾回收——和轮询回执一样属于过程，不该带进下一个 Step。只用 `append` + `start` / `done`，**不要用 `init`**（整表重置属于拓扑级动作，会抹掉你在本 Step 内定位用的 Phase 结构）。
+- 一个细粒度项膨胀成新的 Phase / Step 时，它已经升级为拓扑变化：写进 report，rewind 后落地。
 
 ## 4 Checkpoint / Rewind 纪律
 - 每个 Step 开始时 `checkpoint`，结束时 `rewind`。同一时刻只能有一个活跃 checkpoint，不可嵌套，yield 前必须 rewind。
@@ -94,7 +98,7 @@ Todo 只反映现在，不当历史台账。只把当前 Phase 展开到 Step �
 - 当你在上下文里看到一份 checkpoint 报告，说明你**已经**执行过 rewind（rewind 通常不留独立调用记录，报告本身就是记录），不要怀疑、不要重复调用。
 - `checkpoint` 的 `goal` 必须写成 `P<n>/S<m> <Step 名>：<关键 id>`（例：`P3/S3 等待观测：task-7f2a`）。它是这个 checkpoint 唯一的可辨识标签，冲突时全靠它判归属；写"继续调查"这类无主语描述等于放弃判定能力。
 - 不要凭记忆判断自己 rewind 过没有：`checkpoint` 是廉价幂等的状态探针，直接开，让报错说话。但报错只说"有一个活跃 checkpoint"（`Checkpoint already active.`），**没说它是谁的**——"刚开完 checkpoint 又重试一次"和"上一个 Step 没收尾"同样常见。所以先判归属：在上下文里向上找最近一条其后没有 rewind 报告的 `Checkpoint created.`，读它的 `Goal:`。**是本 Step 自己的** → 忽略报错，不 rewind 不重开，直接继续干活；**是上一个 Step / Phase 的** → 立刻 `rewind` 补写那个 Step 的 report，成功后再开本 Step 的新 checkpoint；**上下文被压缩找不到记录** → 按上一个 Step 处理（先 rewind 写残缺 report 再重开）。绝不能忽略冲突继续在别人的 checkpoint 下工作（两个 Step 上下文混在一起，report 概述不准，yield 还会被拦），也不要一见报错就把本 Step 刚开的 checkpoint rewind 掉。
-- rewind 还会**重置 todo**（从 checkpoint 之前的分支重新装载），所以 checkpoint 期间的 todo 变更活不过 rewind。**rewind 成功后的第一件事是核对并落地 todo 变更，之后才开下一个 checkpoint**；checkpoint 期间要改就把"该怎么改"写进 report 的"Todo 同步"段（唯一能穿过 rewind 的载体），rewind 后重新检查当前 todo 实际状态再重做。
+- rewind 还会**重置 todo**（从 checkpoint 之前的分支重新装载）。**拓扑级** todo 变更因此只在"rewind 之后、下一个 checkpoint 之前"留得住：rewind 成功后第一件事就是核对并落地，checkpoint 期间发现拓扑要变就写进 report 的"Todo 同步"段，rewind 后 `todo view` 确认实际状态再落地。**Step 内细粒度 todo 相反**：就在 checkpoint 里实时维护（`append` / `start` / `done`，不要 `init`），被 rewind 清掉正是预期行为。
 - `rewind` 报"没有活跃 checkpoint"就直接开新的；报"已 rewound"就从保留的 report 继续，不要重试。报告实在回忆不全就写可确认部分并标注中间过程已丢失，同时补一次取证把 id 捞回来。
 - 关键的取证/落盘/派发调用一次一条地发。同一 turn 里串联多条，遇到排队消息或系统建议会被整批跳过（`Skipped due to pending ...`），而跳过很容易被误读成已完成；被跳过的调用必须重新发起。
 
@@ -174,6 +178,7 @@ brief 必填 12 节，缺一节就是在赌它能猜对：
 - 让 worker 一次性跑几百行脚本
 - 用 worker 报告里的输出片段当验收证据
 - 一次性把全部 Phase 排成几十条 todo 然后再也不动；或需求变更废弃了旧 Phase 却把 todo 留成 pending / 标成 completed
+- 在 checkpoint 里做拓扑级 todo 变更就以为改完了（会被 rewind 回滚）；或反过来在 checkpoint 里完全不敢维护 Step 内细粒度 todo、或用 `init` 整表重置
 
 ## 任务
 <在这里写：目标、已知约束、验收标准、涉及的仓库与基线>

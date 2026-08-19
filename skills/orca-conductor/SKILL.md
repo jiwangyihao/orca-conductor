@@ -73,7 +73,7 @@ S1 规划 ──┬──▶ S2 派发 ──▶ S3 等待观测 ──┬──
 
 - **结束 Step 的理由不只有"做完了"**。"我需要进入一个专门步骤处理突发事项"同样合法且推荐——正好用 rewind 把一堆轮询输出压成一句结论再进 S4。
 - **rewind 会丢弃 Step 内的中间上下文**。task id、dispatch id、基线 SHA、brief 与台账路径、owned 清单，必须写进 report 或落盘到 `conductor-state.md`。丢了 dispatch id，就再也无法向那个 worker 补发指令。
-- **rewind 还会重置 todo**，所以 todo 变更只在"rewind 之后、下一个 checkpoint 之前"这个窗口里留得住。见下一节。
+- **rewind 还会重置 todo**，所以**拓扑级** todo 变更只在"rewind 之后、下一个 checkpoint 之前"这个窗口里留得住；Step 内的细粒度 todo 则照常在 checkpoint 里维护（它本来就不该跨 Step 存活）。见下一节。
 - **看到 checkpoint 报告 = 你已经 rewind 过了**。rewind 通常不留独立调用记录，报告本身就是记录；不要怀疑，也不要重复调用（会报错）。
 - **`Checkpoint already active.` 要先做归属判定，再决定动作**。不要靠记忆判断自己 rewind 过没有——直接开 checkpoint，让报错说话；但报错只说"有一个活跃 checkpoint"，没说它是谁的。所以 checkpoint 的 `goal` 必须写成 `P<n>/S<m> <Step 名>：<关键 id>`，然后在上下文里向上找最近一条其后没有 rewind 报告的 `Checkpoint created.`，读它的 `Goal:`：**是本 Step 自己的**（刚开完又重试了一次）就忽略报错、直接继续干活，不 rewind 也不重开；**是上一个 Step/Phase 的**才立刻补 rewind 写完那个 Step 的 report，再开本 Step 的新 checkpoint；**找不到记录**（上下文被压缩）就按上一个 Step 处理。绝不能忽略冲突继续在别人的 checkpoint 下工作：两个 Step 上下文混在一起后，任何 report 都概述不准，yield 还会被拦。另两种报错无歧义：报"没有活跃 checkpoint"就直接开新的，报"已经 rewound"就从保留的 report 继续。
 
@@ -90,12 +90,17 @@ Todo 列表的唯一作用是让人一眼看出"现在在哪个 Phase、这个 P
 - Phase 出口条件被改写，或 Phase 被跳过 / 合并 / 拆分
 - 每次 rewind 之后核对一次（report 里就该声明"todo 需不需要重建"）
 
-**改 todo 有唯一的有效时机：rewind 之后、下一个 checkpoint 之前。** rewind 会把 todo 状态从 checkpoint 之前的分支重新装载，所以 checkpoint 活跃期间做的 todo 变更全是临时的，rewind 后一律回到开 checkpoint 那一刻的样子。由此推出：
+**todo 分两级，改的时机不同。** rewind 会把 todo 从 checkpoint 之前的分支重新装载，所以 checkpoint 期间的变更活不过 rewind——这对两级 todo 意味着完全相反的结论：
 
-1. **rewind 成功后的第一件事就是处理 todo**——先核对再落地，然后才开下一个 checkpoint 去干活。开了 checkpoint 再想起来改，等于白改。
-2. checkpoint 期间要改也可以（对当前推理有用），但必须把"应该怎么改"写进 report 的"Todo 同步"段落。**那是唯一能穿过 rewind 的载体**，rewind 后照着重做一遍。
-3. 所以"Todo 同步"写的是**待执行的指令**，不是已完成的汇报——写"P3 三条标 completed、P4/P5 删除、按 P6 重建"，而不是"已标完 P3"（那次操作已经被回滚了）。
-4. 重做前**重新看一眼 todo 当前实际长什么样**，不要凭记忆信任 checkpoint 期间的操作结果。
+| 层级 | 内容 | 生存期 | 什么时候改 |
+|---|---|---|---|
+| **拓扑级** | Phase / Step 条目，与 checkpoint 编号、worktree 分组同源 | 跨 checkpoint 长期存在 | **只在 rewind 之后、下一个 checkpoint 之前** |
+| **Step 内细粒度** | 本 Step 的操作清单：要读哪几个文件、要发哪几条 orca 命令、还剩哪 3 个 worker 待核对 | 只活在本 checkpoint 内 | **就在 checkpoint 内实时维护** |
+
+细粒度项被 rewind 清掉不是数据丢失，而是**正确的垃圾回收**——它们和轮询输出一样属于过程，不属于结论；本来就不该留到下一个 Step。所以"checkpoint 期间不许动 todo"是误读，该管住的只有拓扑级变更。
+
+- **拓扑级**：rewind 成功后的第一件事就是核对并落地，然后才开下一个 checkpoint 去干活；开了 checkpoint 再改等于白改。若 checkpoint 期间发现拓扑要变（某个 Phase 作废、要多插一轮验收），不要在 checkpoint 里试图固化它，写进 report 的"Todo 同步"段——**那是唯一能穿过 rewind 的载体**。因此"Todo 同步"写的是**待执行指令**，不是已完成汇报：写"P3 三条标 completed、P4/P5 删除、按 P6 重建"，而不是"已标完 P3"（那次操作已被回滚）。落地前先 `todo view` 看实际状态，不要凭记忆。
+- **细粒度**：在 checkpoint 内只用 `append` 往当前 Phase 挂条目、用 `start` / `done` 推进。**不要用 `init`**——整表重置是拓扑级动作，会抹掉你在本 Step 内赖以定位的 Phase 拓扑（虽然 rewind 会还原，但你在本 Step 剩下的时间里已经没有地图了）。
 
 **重规划动作**：
 
@@ -217,7 +222,8 @@ OMP 在有排队的用户消息或系统建议时，会**跳过**该批次里尚
 - 一次性把全部 Phase 排成几十条 todo，然后再也不动它
 - 需求变更废弃了旧 Phase，却把对应 todo 留成 pending 或标成 completed
 - 等用户问"todo 是不是落后了"才重规划
-- 在 checkpoint 活跃期间改 todo 就以为改完了（rewind 会把它回滚），或者 rewind 后不先落地 todo 就直接开下一个 checkpoint
+- 在 checkpoint 活跃期间做**拓扑级** todo 变更就以为改完了（rewind 会把它回滚），或者 rewind 后不先落地 todo 就直接开下一个 checkpoint
+- 反过来因为怕被回滚就在 checkpoint 里完全不敢维护 Step 内细粒度 todo，或者在 checkpoint 里用 `init` 整表重置
 - 撞上 `Checkpoint already active.` 后不做归属判定：要么忽略报错继续在上一个 Step 的过期 checkpoint 下工作，要么反过来把本 Step 刚开的 checkpoint 一把 rewind 掉
 - checkpoint 的 `goal` 写成"继续调查"这类无主语描述，导致冲突时无法判断活跃 checkpoint 属于哪个 Step
 - 状态不明时用 `worker-stop` 并宣称"已停止"（该用 `worker-abandon`）
